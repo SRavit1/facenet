@@ -41,6 +41,16 @@ from tensorflow.python.platform import gfile
 import math
 from six import iteritems
 
+import random
+import copy
+import math
+import os
+import torch
+from torch import nn
+import cv2
+from PIL import Image
+from turbojpeg import TurboJPEG
+
 def triplet_loss(anchor, positive, negative, alpha):
     """Calculate the triplet loss according to the FaceNet paper
     
@@ -329,6 +339,166 @@ def get_dataset(path, has_class_directories=True):
   
     return dataset
 
+# TORCH TRAINING - RAVIT
+class FaceNet(nn.Module):
+    def __init__(self, full=True, binary=True, sparsity=0.1, align=False):
+        super(FaceNet, self).__init__()
+        #input: 250x250x3
+        self.conv1 = nn.Conv2d(3, 32, 2, stride=2, bias=False) #output 125x125x32
+        self.conv2 = nn.Conv2d(32, 32, 2, stride=2, bias=False) #output 62x62x32
+        self.conv3 = nn.Conv2d(32, 32, 2, stride=2, bias=False) #output 31x31x32
+        self.conv4 = nn.Conv2d(32, 64, 2, stride=2, bias=False) #output 15x15x64
+        self.conv5 = nn.Conv2d(64, 64, 3, stride=3, bias=False) #output 5x5x64
+        self.conv6 = nn.Conv2d(64, 128, 2, stride=2, bias=False) #output 2x2x128
+        self.conv7 = nn.Conv2d(128, 128, 2, stride=2, bias=False) #output 1x1x128
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        x = self.conv5(x)
+        x = self.conv6(x)
+        x = self.conv7(x)
+        return x.flatten(start_dim=1)
+
+def embedding_distance(image_embedding_a, image_embedding_b):
+    return torch.sqrt(torch.sum(torch.square(image_embedding_b-image_embedding_a), dim=1))
+
+def triplet_loss(anchor_embeddings, positive_embeddings, negative_embeddings, alpha=0.2):
+    return torch.sum(embedding_distance(positive_embeddings, anchor_embeddings)) - \
+        torch.sum(embedding_distance(negative_embeddings, anchor_embeddings)) + \
+        alpha
+
+def calculate_accuracy(anchor_embeddings, positive_embeddings, negative_embeddings, alpha=0.2):
+    tp = torch.sum(embedding_distance(anchor_embeddings, positive_embeddings) < alpha)
+    tn = torch.sum(embedding_distance(anchor_embeddings, negative_embeddings) > alpha)
+    tp_rate = tp/len(positive_embeddings)
+    tn_rate = tn/len(negative_embeddings)
+    accuracy = (tp_rate + tn_rate)/2
+    return tp_rate, tn_rate, accuracy
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+class FaceRecognitionDataset(torch.utils.data.IterableDataset):
+    def __init__(self, path, model=None, alpha=0.2, image_dim=250, desired_triplets_per_identity=50,
+        sample_faces_per_identity=40, identities_per_minibatch=100):
+        self.path = path
+        self.dataset = get_dataset(self.path)
+        self.add_model(model)
+        self.alpha = alpha
+
+        self.image_dim = image_dim
+
+        self.num_identities = len(self.dataset)
+
+        self.desired_triplets_per_identity = desired_triplets_per_identity
+        self.sample_faces_per_identity = sample_faces_per_identity
+        self.identities_per_minibatch = identities_per_minibatch
+        
+        self.jpeg_reader = TurboJPEG()
+
+    def shuffle_dataset(self):
+        for identity in self.dataset:
+            random.shuffle(identity.image_paths)
+        random.shuffle(self.dataset)
+
+    def add_model(self, model):
+        self.model = model
+
+    def image_path_to_image(self, image_path):
+        """
+        image = cv2.imread(image_path) #HWC
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, (self.image_dim, self.image_dim))
+        image = torch.tensor(image)
+        image = torch.transpose(image, 0, 2)
+        image = torch.transpose(image, 1, 2) #CHW
+        image = torch.unsqueeze(image, 0)
+        image = image.type(torch.FloatTensor)
+        """
+        """
+        image = Image.open(image_path) #WHC
+        image = np.asarray(image)
+        image = torch.tensor(image)
+        image = torch.transpose(image, 0, 2) #CHW
+        """
+        with open(image_path, 'rb') as f:
+            image = self.jpeg_reader.decode(f.read(), 0) #HWC
+        image = torch.tensor(image)
+        image = torch.transpose(image, 0, 2)
+        image = torch.transpose(image, 1, 2) #CHW
+        image = torch.unsqueeze(image, 0)
+        return image
+
+    def calculate_embedding(self, image_path):
+        if self.model is None:
+            return -1
+        image = self.image_path_to_image(image_path).type(torch.FloatTensor)
+
+        with torch.no_grad():
+            embedding = self.model.forward(image)
+        return embedding
+
+
+    def __iter__(self):
+        self.shuffle_dataset()
+        for iden in range(0, self.num_identities, self.identities_per_minibatch):
+            #minibatch_identities = copy.deepcopy(self.dataset[iden:iden+self.identities_per_minibatch])
+            minibatch_identities = self.dataset[iden:iden+self.identities_per_minibatch]
+
+            minibatch = torch.empty((self.desired_triplets_per_identity*self.identities_per_minibatch, 3, 3, self.image_dim, self.image_dim))
+            minibatch_index = 0
+            for identity in minibatch_identities:
+                identity_image_paths = identity.image_paths[:self.sample_faces_per_identity]
+
+                identity_triplets = []
+                for _ in range(self.desired_triplets_per_identity):
+                    anchor = random.choice(identity_image_paths)
+                    available_pos_image_paths = [path for path in identity_image_paths if path is not anchor]
+                    if len(available_pos_image_paths) == 0:
+                        continue
+                    positive = random.choice(available_pos_image_paths)
+
+                    available_neg_identities = [neg_identity for neg_identity in minibatch_identities if not neg_identity.name==identity.name]
+                    negative_identity = random.choice(available_neg_identities)
+                    negative = random.choice(negative_identity.image_paths)
+                    
+                    if self.model is not None:
+                        anchor_positive_distance = embedding_distance(self.calculate_embedding(anchor), self.calculate_embedding(positive))
+                        positive_embedding = self.calculate_embedding(positive)
+                        for proposed_negative_identity in available_neg_identities:
+                            for proposed_negative in proposed_negative_identity.image_paths:
+                                proposed_negative_embedding = self.calculate_embedding(proposed_negative)
+                                distance = embedding_distance(positive_embedding, proposed_negative_embedding)
+                                if distance < self.alpha and distance > anchor_positive_distance: #semi hard negative sample found
+                                    negative = proposed_negative
+                                    break
+
+                    minibatch[minibatch_index][0] = self.image_path_to_image(anchor)
+                    minibatch[minibatch_index][1] = self.image_path_to_image(positive)
+                    minibatch[minibatch_index][2] = self.image_path_to_image(negative)
+                    
+                    minibatch_index += 1
+
+            yield minibatch[:minibatch_index]
+# TORCH TRAINING - RAVIT
+
 def get_image_paths(facedir):
     image_paths = []
     if os.path.isdir(facedir):
@@ -454,6 +624,7 @@ def calculate_roc(thresholds, embeddings1, embeddings2, actual_issame, nrof_fold
         fpr = np.mean(fprs,0)
     return tpr, fpr, accuracy
 
+"""
 def calculate_accuracy(threshold, dist, actual_issame):
     predict_issame = np.less(dist, threshold)
     tp = np.sum(np.logical_and(predict_issame, actual_issame))
@@ -465,7 +636,7 @@ def calculate_accuracy(threshold, dist, actual_issame):
     fpr = 0 if (fp+tn==0) else float(fp) / float(fp+tn)
     acc = float(tp+tn)/dist.size
     return tpr, fpr, acc
-
+"""
 
   
 def calculate_val(thresholds, embeddings1, embeddings2, actual_issame, far_target, nrof_folds=10, distance_metric=0, subtract_mean=False):
