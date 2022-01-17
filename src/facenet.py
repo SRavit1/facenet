@@ -396,7 +396,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 class FaceRecognitionDataset(torch.utils.data.IterableDataset):
-    def __init__(self, path, model=None, alpha=0.2, image_dim=250, desired_triplets_per_identity=50,
+    def __init__(self, path, model=None, alpha=0.2, image_dim=224, desired_triplets_per_identity=50,
         sample_faces_per_identity=40, identities_per_minibatch=100):
         self.path = path
         self.dataset = get_dataset(self.path)
@@ -410,7 +410,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         self.desired_triplets_per_identity = desired_triplets_per_identity
         self.sample_faces_per_identity = sample_faces_per_identity
         self.identities_per_minibatch = identities_per_minibatch
-        
+
         self.jpeg_reader = TurboJPEG()
 
     def shuffle_dataset(self):
@@ -440,6 +440,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         """
         with open(image_path, 'rb') as f:
             image = self.jpeg_reader.decode(f.read(), 0) #HWC
+        image = cv2.resize(image, (self.image_dim, self.image_dim))
         image = torch.tensor(image)
         image = torch.transpose(image, 0, 2)
         image = torch.transpose(image, 1, 2) #CHW

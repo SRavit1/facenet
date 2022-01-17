@@ -43,6 +43,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import resnet
 from tqdm import tqdm
 
 from tensorflow.python.ops import data_flow_ops
@@ -62,7 +63,7 @@ def main(args):
 
     # Write arguments to a text file
     #facenet.write_arguments_to_file(args, os.path.join(log_dir, 'arguments.txt'))
-        
+    
     # Store some git revision info in a text file in the log directory
     src_path,_ = os.path.split(os.path.realpath(__file__))
     #facenet.store_revision_info(src_path, log_dir, ' '.join(sys.argv))
@@ -83,8 +84,8 @@ def main(args):
         lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
     
     # TORCH TRAINING - RAVIT
-    model = facenet.FaceNet()
-    modelName = "FaceNet"
+    model = resnet.resnet18(full=False)
+    modelName = "ResNet18"
 
     trainModel(model, modelName, args.data_dir, args.lfw_dir, args.models_base_dir)
 
@@ -96,10 +97,13 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, learning_ra
     train_set = facenet.FaceRecognitionDataset(data_dir, model=model, alpha=alpha)
     test_set = facenet.FaceRecognitionDataset(lfw_dir)
 
+    dummy_input = torch.ones((1, 3, train_set.image_dim, train_set.image_dim))
+
     training_history = {"train_loss":[], "train_acc":[], "eval_loss":[], "eval_acc":[]}
     for epoch in tqdm(range(epochs)):
         if epoch % checkpoint_freq == 0:
             torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + "_ckpt.pt"))
+            torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+"_ckpt.onnx"), opset_version=12)
 
         loss, accuracy = train(train_set, model, alpha, optimizer)
         eval_loss, eval_accuracy = evaluate(train_set, model, alpha)
@@ -110,8 +114,8 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, learning_ra
         training_history["eval_acc"].append(eval_accuracy)
         print("Epoch[{:d}]- Loss: {:.3f}, Acuracy: {:.3f}, Eval Loss: {:.3f}, Eval Accuracy {:.3f}".format(epoch, 
             loss, accuracy, eval_loss, eval_accuracy))
-    torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + "_ckpt.pt"))
-
+    torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + ".pt"))
+    torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+".onnx"), opset_version=9)
 def train(train_set, model, alpha, optimizer):
     #input: train_set, model, alpha, optimizer
     #return: loss, accuracy
