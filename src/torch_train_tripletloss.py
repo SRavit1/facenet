@@ -100,21 +100,33 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
 
     dummy_input = torch.ones((1, 3, train_set.image_dim, train_set.image_dim))
 
+    log_file = os.path.join(log_dir, "log.txt")
+
+    with open(log_file, "a") as f:
+        f.write("Begin training\n")
+
     training_history = {"train_loss":[], "train_acc":[], "eval_loss":[], "eval_acc":[]}
     for epoch in tqdm(range(epochs)):
         if epoch % checkpoint_freq == 0:
             torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + "_ckpt.pt"))
             torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+"_ckpt.onnx"), opset_version=12)
 
-        loss, accuracy = train(train_set, model, alpha, optimizer)
+        epoch_start = datetime.now()
+        loss, accuracy = train(train_set, model, alpha, optimizer, log_file)
         eval_loss, eval_accuracy = evaluate(train_set, model, alpha)
+        epoch_end = datetime.now()
 
         training_history["train_loss"].append(loss)
         training_history["train_acc"].append(accuracy)
         training_history["eval_loss"].append(eval_loss)
         training_history["eval_acc"].append(eval_accuracy)
-        print("Epoch[{:d}]- Loss: {:.3f}, Acuracy: {:.3f}, Eval Loss: {:.3f}, Eval Accuracy {:.3f}".format(epoch, 
-            loss, accuracy, eval_loss, eval_accuracy))
+        
+
+        epoch_string = "Epoch[{:d}] finished in {:s} - Loss: {:.3f}, Acuracy: {:.3f}, Eval Loss: {:.3f}, Eval Accuracy {:.3f}".format(epoch+1, 
+            str(epoch_end-epoch_start), loss, accuracy, eval_loss, eval_accuracy)
+        print(epoch_string)
+        with open(log_file, "a") as f:
+            f.write(epoch_string + "\n")
     
     torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + ".pt"))
     torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+".onnx"), opset_version=9)
@@ -138,15 +150,16 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
     plt.ylabel("Acuracy")
     plt.savefig(os.path.join(log_dir, modelName + "_acc.png"))
 
-def train(train_set, model, alpha, optimizer):
+def train(train_set, model, alpha, optimizer, log_file):
     #input: train_set, model, alpha, optimizer
     #return: loss, accuracy
     loss_meter = facenet.AverageMeter()
     accuracy_meter = facenet.AverageMeter()
-    minibatch_no = 1
+    minibatch_no = 0
     for minibatch in iter(train_set):
         minibatch_no += 1
         
+        minibatch_start = datetime.now()
         # calculate embeddings for anchors
         anchor_images = minibatch[:,0]
         positive_images = minibatch[:,1]
@@ -167,6 +180,12 @@ def train(train_set, model, alpha, optimizer):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        minibatch_end = datetime.now()
+
+        minibatch_str = "\tMinibatch {:d} finished in {:s}\n".format(minibatch_no, 
+            str(minibatch_end-minibatch_start))
+        with open(log_file, "a") as f:
+            f.write(minibatch_str)
     return loss_meter.val, accuracy_meter.val
 
 def evaluate(test_set, model, alpha):
