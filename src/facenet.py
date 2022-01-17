@@ -340,27 +340,6 @@ def get_dataset(path, has_class_directories=True):
     return dataset
 
 # TORCH TRAINING - RAVIT
-class FaceNet(nn.Module):
-    def __init__(self, full=True, binary=True, sparsity=0.1, align=False):
-        super(FaceNet, self).__init__()
-        #input: 250x250x3
-        self.conv1 = nn.Conv2d(3, 32, 2, stride=2, bias=False) #output 125x125x32
-        self.conv2 = nn.Conv2d(32, 32, 2, stride=2, bias=False) #output 62x62x32
-        self.conv3 = nn.Conv2d(32, 32, 2, stride=2, bias=False) #output 31x31x32
-        self.conv4 = nn.Conv2d(32, 64, 2, stride=2, bias=False) #output 15x15x64
-        self.conv5 = nn.Conv2d(64, 64, 3, stride=3, bias=False) #output 5x5x64
-        self.conv6 = nn.Conv2d(64, 128, 2, stride=2, bias=False) #output 2x2x128
-        self.conv7 = nn.Conv2d(128, 128, 2, stride=2, bias=False) #output 1x1x128
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        x = self.conv5(x)
-        x = self.conv6(x)
-        x = self.conv7(x)
-        return x.flatten(start_dim=1)
-
 def embedding_distance(image_embedding_a, image_embedding_b):
     return torch.sqrt(torch.sum(torch.square(image_embedding_b-image_embedding_a), dim=1))
 
@@ -397,7 +376,7 @@ class AverageMeter(object):
 
 class FaceRecognitionDataset(torch.utils.data.IterableDataset):
     def __init__(self, path, model=None, alpha=0.2, image_dim=224, desired_triplets_per_identity=50,
-        sample_faces_per_identity=40, identities_per_minibatch=100):
+        sample_faces_per_identity=40, identities_per_minibatch=100, hard_sample_mining=True):
         self.path = path
         self.dataset = get_dataset(self.path)
         self.add_model(model)
@@ -410,6 +389,8 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         self.desired_triplets_per_identity = desired_triplets_per_identity
         self.sample_faces_per_identity = sample_faces_per_identity
         self.identities_per_minibatch = identities_per_minibatch
+
+        self.hard_sample_mining = hard_sample_mining
 
         self.jpeg_reader = TurboJPEG()
 
@@ -460,7 +441,6 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
     def __iter__(self):
         self.shuffle_dataset()
         for iden in range(0, self.num_identities, self.identities_per_minibatch):
-            #minibatch_identities = copy.deepcopy(self.dataset[iden:iden+self.identities_per_minibatch])
             minibatch_identities = self.dataset[iden:iden+self.identities_per_minibatch]
 
             minibatch = torch.empty((self.desired_triplets_per_identity*self.identities_per_minibatch, 3, 3, self.image_dim, self.image_dim))
@@ -480,7 +460,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
                     negative_identity = random.choice(available_neg_identities)
                     negative = random.choice(negative_identity.image_paths)
                     
-                    if self.model is not None:
+                    if self.hard_sample_mining and self.model is not None:
                         anchor_positive_distance = embedding_distance(self.calculate_embedding(anchor), self.calculate_embedding(positive))
                         positive_embedding = self.calculate_embedding(positive)
                         for proposed_negative_identity in available_neg_identities:

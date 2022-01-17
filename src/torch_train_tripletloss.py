@@ -45,6 +45,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import resnet
 from tqdm import tqdm
+from matplotlib import pyplot as plt
 
 from tensorflow.python.ops import data_flow_ops
 
@@ -87,11 +88,11 @@ def main(args):
     model = resnet.resnet18(full=False)
     modelName = "ResNet18"
 
-    trainModel(model, modelName, args.data_dir, args.lfw_dir, args.models_base_dir)
+    trainModel(model, modelName, args.data_dir, args.lfw_dir, model_dir, log_dir)
 
     return model_dir
 
-def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, learning_rate=0.05, epochs=100, alpha=0.2, checkpoint_freq=10):
+def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, learning_rate=0.05, epochs=100, alpha=0.2, checkpoint_freq=10):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     train_set = facenet.FaceRecognitionDataset(data_dir, model=model, alpha=alpha)
@@ -114,8 +115,29 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, learning_ra
         training_history["eval_acc"].append(eval_accuracy)
         print("Epoch[{:d}]- Loss: {:.3f}, Acuracy: {:.3f}, Eval Loss: {:.3f}, Eval Accuracy {:.3f}".format(epoch, 
             loss, accuracy, eval_loss, eval_accuracy))
+    
     torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + ".pt"))
     torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+".onnx"), opset_version=9)
+
+    epochs_list = list(range(epochs))
+
+    plt.clf()
+    plt.plot(epochs_list, training_history["train_loss"])
+    plt.plot(epochs_list, training_history["eval_loss"])
+    plt.legend(["train_loss", "eval_loss"])
+    plt.yscale("log")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
+    plt.savefig(os.path.join(log_dir, modelName + "_loss.png"))
+
+    plt.clf()
+    plt.plot(epochs_list, training_history["train_acc"])
+    plt.plot(epochs_list, training_history["eval_acc"])
+    plt.legend(["train_acc", "eval_acc"])
+    plt.xlabel("Epochs")
+    plt.ylabel("Acuracy")
+    plt.savefig(os.path.join(log_dir, modelName + "_acc.png"))
+
 def train(train_set, model, alpha, optimizer):
     #input: train_set, model, alpha, optimizer
     #return: loss, accuracy
