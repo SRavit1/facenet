@@ -374,9 +374,10 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+"""
 class FaceRecognitionDataset(torch.utils.data.IterableDataset):
-    def __init__(self, path, model=None, alpha=0.2, image_dim=224, desired_triplets_per_identity=50,
-        sample_faces_per_identity=40, identities_per_minibatch=100, hard_sample_mining=True):
+    def __init__(self, path, model=None, alpha=0.2, image_dim=224, desired_triplets_per_identity=4,
+        sample_faces_per_identity=40, identities_per_minibatch=10, hard_sample_mining=True):
         self.path = path
         self.dataset = get_dataset(self.path)
         self.add_model(model)
@@ -394,6 +395,8 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
 
         self.jpeg_reader = TurboJPEG()
 
+        self.image_read_counter = 0
+
     def shuffle_dataset(self):
         for identity in self.dataset:
             random.shuffle(identity.image_paths)
@@ -403,7 +406,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         self.model = model
 
     def image_path_to_image(self, image_path):
-        """
+        " ""
         image = cv2.imread(image_path) #HWC
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (self.image_dim, self.image_dim))
@@ -412,13 +415,13 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         image = torch.transpose(image, 1, 2) #CHW
         image = torch.unsqueeze(image, 0)
         image = image.type(torch.FloatTensor)
-        """
-        """
+        " ""
+        " ""
         image = Image.open(image_path) #WHC
         image = np.asarray(image)
         image = torch.tensor(image)
         image = torch.transpose(image, 0, 2) #CHW
-        """
+        " ""
         with open(image_path, 'rb') as f:
             image = self.jpeg_reader.decode(f.read(), 0) #HWC
         image = cv2.resize(image, (self.image_dim, self.image_dim))
@@ -426,6 +429,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         image = torch.transpose(image, 0, 2)
         image = torch.transpose(image, 1, 2) #CHW
         image = torch.unsqueeze(image, 0)
+        self.image_read_counter += 1
         return image
 
     def calculate_embedding(self, image_path):
@@ -460,6 +464,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
                     negative_identity = random.choice(available_neg_identities)
                     negative = random.choice(negative_identity.image_paths)
                     
+                    " ""
                     if self.hard_sample_mining and self.model is not None:
                         anchor_positive_distance = embedding_distance(self.calculate_embedding(anchor), self.calculate_embedding(positive))
                         positive_embedding = self.calculate_embedding(positive)
@@ -470,6 +475,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
                                 if distance < self.alpha and distance > anchor_positive_distance: #semi hard negative sample found
                                     negative = proposed_negative
                                     break
+                    " ""
 
                     minibatch[minibatch_index][0] = self.image_path_to_image(anchor)
                     minibatch[minibatch_index][1] = self.image_path_to_image(positive)
@@ -477,7 +483,179 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
                     
                     minibatch_index += 1
 
+            #print("Minibatch outputed", self.identities_per_minibatch*self.desired_triplets_per_identity,"triplets after", self.image_read_counter, "image reads.")
+            #print("Total # identities, identities / minibatch", self.num_identities, self.identities_per_minibatch)
+            self.image_read_counter = 0
             yield minibatch[:minibatch_index]
+"""
+
+class FaceRecognitionDataset(torch.utils.data.IterableDataset):
+    def __init__(self, path, model=None, alpha=0.2, image_dim=224,
+        people_per_batch=45, images_per_person=40, batch_size=90, epoch_size=1000, hard_sample_mining=True):
+        self.path = path
+        self.dataset = get_dataset(self.path)
+        self.model = model
+        self.alpha = alpha
+        self.image_dim = image_dim
+        self.hard_sample_mining = hard_sample_mining
+        self.jpeg_reader = TurboJPEG()
+        self.image_read_counter = 0
+
+        self.num_identities = len(self.dataset)
+        self.people_per_batch = people_per_batch
+        self.images_per_person = images_per_person
+        self.batch_size = batch_size
+        self.epoch_size = epoch_size
+
+    def shuffle_dataset(self):
+        for identity in self.dataset:
+            random.shuffle(identity.image_paths)
+        random.shuffle(self.dataset)
+
+    def image_paths_to_images(self, image_paths):
+        images = torch.zeros((len(image_paths), 3, self.image_dim, self.image_dim)).type(torch.FloatTensor)
+        for i in range(len(image_paths)):
+            image_path = image_paths[i]
+            with open(image_path, 'rb') as f:
+                image = self.jpeg_reader.decode(f.read(), 0) #HWC
+            image = cv2.resize(image, (self.image_dim, self.image_dim))
+            image = torch.tensor(image)
+            image = torch.transpose(image, 0, 2)
+            image = torch.transpose(image, 1, 2) #CHW
+            image = torch.unsqueeze(image, 0)
+            self.image_read_counter += 1
+            images[i] = image
+        return images
+
+    def calculate_embeddings(self, nrof_examples, image_paths, embedding_size=128):
+        if self.model is None:
+            return None
+
+        emb_array = np.zeros((nrof_examples, embedding_size))
+        for i in range(0, nrof_examples, self.batch_size):
+            image_paths_batch = image_paths[i:i+self.batch_size]
+            images_batch = self.image_paths_to_images(image_paths_batch)
+            with torch.no_grad():
+                emb_array[i:i+self.batch_size] = self.model.forward(images_batch)
+
+        return emb_array
+
+    def sample_people(self):
+        #inputs: self.dataset, self.people_per_batch, self.images_per_person
+        dataset = self.dataset
+        people_per_batch = self.people_per_batch
+        images_per_person = self.images_per_person
+
+        nrof_images = people_per_batch * images_per_person
+      
+        # Sample classes from the dataset
+        nrof_classes = len(dataset)
+        class_indices = np.arange(nrof_classes)
+        np.random.shuffle(class_indices)
+        
+        i = 0
+        image_paths = []
+        num_per_class = []
+        sampled_class_indices = []
+        # Sample images from these classes until we have enough
+        while len(image_paths)<nrof_images:
+            class_index = class_indices[i]
+            nrof_images_in_class = len(dataset[class_index])
+            image_indices = np.arange(nrof_images_in_class)
+            np.random.shuffle(image_indices)
+            nrof_images_from_class = min(nrof_images_in_class, images_per_person, nrof_images-len(image_paths))
+            idx = image_indices[0:nrof_images_from_class]
+            image_paths_for_class = [dataset[class_index].image_paths[j] for j in idx]
+            sampled_class_indices += [class_index]*nrof_images_from_class
+            image_paths += image_paths_for_class
+            num_per_class.append(nrof_images_from_class)
+            i+=1
+        
+        return image_paths, num_per_class
+
+    def select_triplets(self, embeddings, nrof_images_per_class, image_paths):
+        people_per_batch = self.people_per_batch
+        alpha = self.alpha
+
+        trip_idx = 0
+        emb_start_idx = 0
+        num_trips = 0
+        triplets = []
+        
+        if self.model is not None:
+            for i in range(people_per_batch):
+                nrof_images = int(nrof_images_per_class[i])
+                for j in range(1,nrof_images):
+                    a_idx = emb_start_idx + j - 1
+                    neg_dists_sqr = np.sum(np.square(embeddings[a_idx] - embeddings), 1)
+                    for pair in range(j, nrof_images): # For every possible positive pair.
+                        p_idx = emb_start_idx + pair
+                        pos_dist_sqr = np.sum(np.square(embeddings[a_idx]-embeddings[p_idx]))
+                        neg_dists_sqr[emb_start_idx:emb_start_idx+nrof_images] = np.NaN
+                        #all_neg = np.where(np.logical_and(neg_dists_sqr-pos_dist_sqr<alpha, pos_dist_sqr<neg_dists_sqr))[0]  # FaceNet selection
+                        all_neg = np.where(neg_dists_sqr-pos_dist_sqr<alpha)[0] # VGG Face selecction
+                        nrof_random_negs = all_neg.shape[0]
+                        if nrof_random_negs>0:
+                            rnd_idx = np.random.randint(nrof_random_negs)
+                            n_idx = all_neg[rnd_idx]
+                            triplets.append([image_paths[a_idx], image_paths[p_idx], image_paths[n_idx]])
+                            #print('Triplet %d: (%d, %d, %d), pos_dist=%2.6f, neg_dist=%2.6f (%d, %d, %d, %d, %d)' % 
+                            #    (trip_idx, a_idx, p_idx, n_idx, pos_dist_sqr, neg_dists_sqr[n_idx], nrof_random_negs, rnd_idx, i, j, emb_start_idx))
+                            trip_idx += 1
+
+                        num_trips += 1
+
+                emb_start_idx += nrof_images
+        else:
+            for i in range(people_per_batch):
+                nrof_images = int(nrof_images_per_class[i])
+                for j in range(1,nrof_images):
+                    a_idx = emb_start_idx + j - 1
+                    neg_dists_sqr = np.sum(np.square(embeddings[a_idx] - embeddings), 1)
+                    for pair in range(j, nrof_images): # For every possible positive pair.
+                        p_idx = emb_start_idx + pair
+                        pos_dist_sqr = np.sum(np.square(embeddings[a_idx]-embeddings[p_idx]))
+                        neg_dists_sqr[emb_start_idx:emb_start_idx+nrof_images] = np.NaN
+                        #all_neg = np.where(np.logical_and(neg_dists_sqr-pos_dist_sqr<alpha, pos_dist_sqr<neg_dists_sqr))[0]  # FaceNet selection
+                        all_neg = np.where(neg_dists_sqr-pos_dist_sqr<alpha)[0] # VGG Face selecction
+                        nrof_random_negs = all_neg.shape[0]
+                        if nrof_random_negs>0:
+                            rnd_idx = np.random.randint(nrof_random_negs)
+                            n_idx = all_neg[rnd_idx]
+                            triplets.append([image_paths[a_idx], image_paths[p_idx], image_paths[n_idx]])
+                            #print('Triplet %d: (%d, %d, %d), pos_dist=%2.6f, neg_dist=%2.6f (%d, %d, %d, %d, %d)' % 
+                            #    (trip_idx, a_idx, p_idx, n_idx, pos_dist_sqr, neg_dists_sqr[n_idx], nrof_random_negs, rnd_idx, i, j, emb_start_idx))
+                            trip_idx += 1
+
+                        num_trips += 1
+
+                emb_start_idx += nrof_images
+        np.random.shuffle(triplets)
+        #print("# triplets/batch: {:d}, identities/batch: {:f}".format(len(triplets), people_per_batch))
+        return triplets, num_trips, len(triplets)
+
+    def __iter__(self):
+        batch_number = 0
+        while batch_number < self.epoch_size:
+            image_paths, num_per_class = self.sample_people()
+
+            nrof_examples = self.people_per_batch * self.images_per_person
+            
+            emb_array = self.calculate_embeddings(nrof_examples, image_paths)
+
+            triplets, nrof_random_negs, nrof_triplets = self.select_triplets(emb_array, num_per_class, image_paths)
+            print("num identities", self.people_per_batch, "images per person", self.images_per_person, "nrof_examples", nrof_examples, "triplets in batch", len(triplets))
+
+            """
+            triplets_f = np.array(triplets).flatten()
+            triplets_tensor = np.reshape(
+                self.image_paths_to_images(triplets_f), (-1, 3, 3, self.image_dim, self.image_dim))
+            """
+
+            nrof_batches = int(np.ceil(nrof_triplets/self.batch_size))
+            batch_number += nrof_batches
+            print("Yielding new batch")
+            yield np.array(triplets)
 # TORCH TRAINING - RAVIT
 
 def get_image_paths(facedir):

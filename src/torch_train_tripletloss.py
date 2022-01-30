@@ -96,24 +96,34 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     train_set = facenet.FaceRecognitionDataset(data_dir, model=model, alpha=alpha)
-    test_set = facenet.FaceRecognitionDataset(lfw_dir)
+    test_set = facenet.FaceRecognitionDataset(lfw_dir, alpha=alphs)
 
     dummy_input = torch.ones((1, 3, train_set.image_dim, train_set.image_dim))
 
     log_file = os.path.join(log_dir, "log.txt")
+    model_ckpt_best = os.path.join(models_base_dir, modelName + "_best")
+    model_ckpt_recent = os.path.join(models_base_dir, modelName + "_recent")
 
     with open(log_file, "a") as f:
         f.write("Begin training\n")
 
     training_history = {"train_loss":[], "train_acc":[], "eval_loss":[], "eval_acc":[]}
+    best_eval_accuracy = 0
     for epoch in tqdm(range(epochs)):
         if epoch % checkpoint_freq == 0:
-            torch.save(model.state_dict(), os.path.join(models_base_dir, modelName + "_ckpt.pt"))
-            torch.onnx.export(model, dummy_input, os.path.join(models_base_dir, modelName+"_ckpt.onnx"), opset_version=12)
+            torch.save(model.state_dict(), model_ckpt_recent + ".pt")
+            torch.onnx.export(model, dummy_input, model_ckpt_recent + ".onnx", opset_version=12)
 
         epoch_start = datetime.now()
-        loss, accuracy = train(train_set, model, alpha, optimizer, log_file)
-        eval_loss, eval_accuracy = evaluate(train_set, model, alpha)
+        loss, accuracy = train(epoch, train_set, model, alpha, optimizer, log_file)
+
+        eval_loss, eval_accuracy = evaluate(test_set, model, alpha)
+
+        if eval_accuracy > best_eval_accuracy:
+            torch.save(model.state_dict(), model_ckpt_best + ".pt")
+            torch.onnx.export(model, dummy_input, model_ckpt_best + ".onnx", opset_version=12)
+            best_eval_accuracy = eval_accuracy
+
         epoch_end = datetime.now()
 
         training_history["train_loss"].append(loss)
@@ -150,68 +160,114 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
     plt.ylabel("Acuracy")
     plt.savefig(os.path.join(log_dir, modelName + "_acc.png"))
 
-def train(train_set, model, alpha, optimizer, log_file):
-    #input: train_set, model, alpha, optimizer
-    #return: loss, accuracy
+def train(epoch, train_set, model, alpha, optimizer, log_file):
     loss_meter = facenet.AverageMeter()
     accuracy_meter = facenet.AverageMeter()
-    minibatch_no = 0
-    for minibatch in iter(train_set):
-        minibatch_no += 1
-        
-        minibatch_start = datetime.now()
-        # calculate embeddings for anchors
-        anchor_images = minibatch[:,0]
-        positive_images = minibatch[:,1]
-        negative_images = minibatch[:,2]
+    batch_number = 0
+    epoch_size = train_set.epoch_size
+    for triplets in iter(train_set):
+        nrof_triplets = len(triplets)
+        nrof_batches = int(np.ceil(nrof_triplets/train_set.batch_size))
+        i = 0
+        while i < nrof_batches:
+            i += 1
+            batch_number += 1
+            #batch_size = min(nrof_triplets-i*train_set.batch_size, train_set.batch_size)
 
-        anchor_embedding = model(anchor_images)
-        with torch.no_grad():
-            positive_embedding = model(positive_images)
-            negative_embedding = model(negative_images)
-        
-        loss = facenet.triplet_loss(anchor_embedding, positive_embedding, negative_embedding, alpha)
-        _, _, accuracy = facenet.calculate_accuracy(anchor_embedding, positive_embedding, negative_embedding, alpha)
+            batch_start = datetime.now()
+            batch = triplets[(i*train_set.batch_size):(i*train_set.batch_size)+train_set.batch_size]
+            batch_size = len(batch)
 
-        loss_meter.update(loss, len(minibatch))
-        accuracy_meter.update(accuracy, len(minibatch))
+            triplets_f = np.array(batch).flatten()
+            batch_tensor = np.reshape(
+                train_set.image_paths_to_images(triplets_f), (-1, 3, 3, train_set.image_dim, train_set.image_dim))
+            batch_tensor = torch.tensor(batch_tensor)
 
-        # optimizer and learning rate step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        minibatch_end = datetime.now()
+            # calculate embeddings for anchors
+            anchor_images = batch_tensor[:,0]
+            positive_images = batch_tensor[:,1]
+            negative_images = batch_tensor[:,2]
 
-        minibatch_str = "\tMinibatch {:d} finished in {:s}\n".format(minibatch_no, 
-            str(minibatch_end-minibatch_start))
-        with open(log_file, "a") as f:
-            f.write(minibatch_str)
+            try:
+                anchor_embedding = model(anchor_images)
+                with torch.no_grad():
+                    positive_embedding = model(positive_images)
+                    negative_embedding = model(negative_images)
+            except Exception:
+                print("Encountered exception in forward pass. batch_tensor has shape", batch_tensor.shape)
+                break
+            
+            loss = facenet.triplet_loss(anchor_embedding, positive_embedding, negative_embedding, alpha)
+            _, _, accuracy = facenet.calculate_accuracy(anchor_embedding, positive_embedding, negative_embedding, alpha)
+
+            loss_meter.update(loss, batch_size)
+            accuracy_meter.update(accuracy, batch_size)
+
+            # optimizer and learning rate step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            batch_end = datetime.now()
+            
+            batch_str = "\tEpoch [{:d}] {:d}/{:d} ({:d} triplets) finished in {:s}. Loss: {:.3f}. Accuracy: {:.3f}\n".format(epoch, batch_number, epoch_size, batch_size,
+                str(batch_end-batch_start), float(loss_meter.val), float(accuracy_meter.val))
+            print(batch_str[:-1])
+            with open(log_file, "a") as f:
+                f.write(batch_str)
     return loss_meter.val, accuracy_meter.val
 
 def evaluate(test_set, model, alpha):
-    #input: test_set, model, alpha
-    #return: eval_loss, eval_accuracy
-    eval_loss_meter = facenet.AverageMeter()
-    eval_accuracy_meter = facenet.AverageMeter()
-    test_minibatch_no = 1
-    for minibatch in iter(test_set):
-        test_minibatch_no += 1
-        
-        # calculate embeddings for anchors
-        anchor_images = minibatch[:,0]
-        positive_images = minibatch[:,1]
-        negative_images = minibatch[:,2]
+    loss_meter = facenet.AverageMeter()
+    accuracy_meter = facenet.AverageMeter()
+    batch_number = 0
+    epoch_size = test_set.epoch_size
+    for triplets in iter(test_set):
+        nrof_triplets = len(triplets)
+        nrof_batches = int(np.ceil(nrof_triplets/test_set.batch_size))
+        i = 0
+        while i < nrof_batches:
+            i += 1
+            batch_number += 1
 
-        with torch.no_grad():
-            anchor_embedding = model(anchor_images)
-            positive_embedding = model(positive_images)
-            negative_embedding = model(negative_images)
-        loss = facenet.triplet_loss(anchor_embedding, positive_embedding, negative_embedding, alpha)
-        _, _, accuracy = facenet.calculate_accuracy(anchor_embedding, positive_embedding, negative_embedding, alpha)
+            batch_start = datetime.now()
+            batch = triplets[(i*test_set.batch_size):(i*test_set.batch_size)+test_set.batch_size]
+            batch_size = len(batch)
 
-        eval_loss_meter.update(loss, len(minibatch))
-        eval_accuracy_meter.update(accuracy, len(minibatch))
-    return eval_loss_meter.val, eval_accuracy_meter.val
+            triplets_f = np.array(batch).flatten()
+            batch_tensor = np.reshape(
+                test_set.image_paths_to_images(triplets_f), (-1, 3, 3, test_set.image_dim, test_set.image_dim))
+            batch_tensor = torch.tensor(batch_tensor)
+
+            # calculate embeddings for anchors
+            anchor_images = batch_tensor[:,0]
+            positive_images = batch_tensor[:,1]
+            negative_images = batch_tensor[:,2]
+
+            try:
+                with torch.no_grad():
+                    anchor_embedding = model(anchor_images)
+                    positive_embedding = model(positive_images)
+                    negative_embedding = model(negative_images)
+            except Exception:
+                print("Encountered exception in forward pass. batch_tensor has shape", batch_tensor.shape)
+                break
+            
+            with torch.no_grad():
+                loss = facenet.triplet_loss(anchor_embedding, positive_embedding, negative_embedding, alpha)
+                _, _, accuracy = facenet.calculate_accuracy(anchor_embedding, positive_embedding, negative_embedding, alpha)
+
+            loss_meter.update(loss, batch_size)
+            accuracy_meter.update(accuracy, batch_size)
+
+            batch_end = datetime.now()
+            
+            batch_str = "\tEvaluation {:d}/{:d} ({:d} triplets) finished in {:s}. Loss: {:.3f}. Accuracy: {:.3f}\n".format(batch_number, epoch_size, batch_size,
+                str(batch_end-batch_start), float(loss_meter.val), float(accuracy_meter.val))
+            print(batch_str[:-1])
+            with open(log_file, "a") as f:
+                f.write(batch_str)
+    return loss_meter.val, accuracy_meter.val
 
 """
 def train(args, sess, dataset, epoch, image_paths_placeholder, labels_placeholder, labels_batch,
@@ -445,11 +501,11 @@ def parse_arguments(argv):
         help='Load a pretrained model before training starts.')
     parser.add_argument('--data_dir', type=str,
         help='Path to the data directory containing aligned face patches.',
-        default='../datasets/CASIA-WebFace')
+        default='/mnt/usb/data/ravit/datasets/CASIA-WebFace')
     parser.add_argument('--model_def', type=str,
         help='Model definition. Points to a module containing the definition of the inference graph.', default='models.inception_resnet_v1')
     parser.add_argument('--max_nrof_epochs', type=int,
-        help='Number of epochs to run.', default=500)
+        help='Number of epochs to run.', default=25)
     parser.add_argument('--batch_size', type=int,
         help='Number of images to process in a batch.', default=90)
     parser.add_argument('--image_size', type=int,
@@ -493,7 +549,7 @@ def parse_arguments(argv):
     parser.add_argument('--lfw_pairs', type=str,
         help='The file containing the pairs to use for validation.', default='data/pairs.txt')
     parser.add_argument('--lfw_dir', type=str,
-        help='Path to the data directory containing aligned face patches.', default='../datasets/lfw')
+        help='Path to the data directory containing aligned face patches.', default='/mnt/usb/data/ravit/datasets/lfw')
     parser.add_argument('--lfw_nrof_folds', type=int,
         help='Number of folds to use for cross validation. Mainly used for testing.', default=10)
     return parser.parse_args(argv)
