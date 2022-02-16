@@ -42,7 +42,7 @@ model_urls = {
 
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1, full=True, binarized=True, bitwidth=1) -> nn.Conv2d:
     """3x3 convolution with padding"""
-    if full:
+    if not binarized:
         return nn.Conv2d(in_planes, 
             out_planes, kernel_size=3, stride=stride, 
             padding=dilation, groups=groups, bias=False, 
@@ -56,7 +56,7 @@ def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, d
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1, full=True, binarized=True, bitwidth=1) -> nn.Conv2d:
     """1x1 convolution"""
-    if full:
+    if not binarized:
         return nn.Conv2d(in_planes, 
             out_planes, kernel_size=1, stride=stride,
             bias=False)
@@ -91,15 +91,17 @@ class BasicBlock(nn.Module):
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride, full=full, binarized=binarized, bitwidth=bitwidth)
         self.bn1 = norm_layer(planes)
-        self.act = nn.ReLU(inplace=True) if full else nn.Hardtanh(inplace=True)
+        self.act = nn.ReLU(inplace=True) if not binarized else nn.Hardtanh(inplace=True)
         self.conv2 = conv3x3(planes, planes, full=full, binarized=binarized, bitwidth=bitwidth)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
 
     def forward(self, x: Tensor) -> Tensor:
-        identity = x
-
+        #identity = x
+        identity = x.clone()
+        #identity.retain_grad()
+        
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.act(out)
@@ -207,22 +209,24 @@ class ResNet(nn.Module):
             )
         self.groups = groups
         self.base_width = width_per_group
-        if full:
+        if not binarized:
             self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         else:
-            self.conv1 = BinarizeConv2d(bitwidth, bitwidth, 3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+            #self.conv1 = BinarizeConv2d(bitwidth, bitwidth, 1, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+            self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = norm_layer(self.inplanes)
-        self.act = nn.ReLU(inplace=True) if full else nn.Hardtanh(inplace=True)
+        self.act = nn.ReLU(inplace=True) if not binarized else nn.Hardtanh(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, 64, layers[0], full=full, binarized=binarized, bitwidth=bitwidth)
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0], full=full, binarized=binarized, bitwidth=bitwidth)
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1], full=full, binarized=binarized, bitwidth=bitwidth)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2], full=full, binarized=binarized, bitwidth=bitwidth)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        if full:
+        if not binarized:
             self.fc = nn.Linear(512 * block.expansion, num_classes)
         else:
-            self.fc = BinarizeLinear(bitwidth, bitwidth, 512 * block.expansion, num_classes)
+            self.fc = nn.Linear(512 * block.expansion, num_classes)
+            #self.fc = BinarizeLinear(bitwidth, bitwidth, 512 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -285,20 +289,32 @@ class ResNet(nn.Module):
 
     def _forward_impl(self, x: Tensor) -> Tensor:
         # See note [TorchScript super()]
+        #print("input shape", x.shape)
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.act(x)
         x = self.maxpool(x)
+        #print("conv1 output shape", x.shape)
 
         x = self.layer1(x)
+        #print("layer1 output shape", x.shape)
         x = self.layer2(x)
+        #print("layer2 output shape", x.shape)
         x = self.layer3(x)
+        #print("layer3 output shape", x.shape)
         x = self.layer4(x)
+        #print("layer4 output shape", x.shape)
 
         x = self.avgpool(x)
+        #print("avgpool output shape", x.shape)
         x = torch.flatten(x, 1)
         x = self.fc(x)
-        x = nn.functional.normalize(x)
+        #print("layer1 output shape", x.shape)
+
+        x_norm = torch.sqrt(torch.sum(torch.mul(x,x), dim=1))  #torch.linalg.norm(x)
+        x_norm = torch.unsqueeze(x_norm, 1)
+
+        x = torch.div(x, x_norm)
 
         return x
 

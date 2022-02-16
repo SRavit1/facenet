@@ -490,7 +490,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
 """
 
 class FaceRecognitionDataset(torch.utils.data.IterableDataset):
-    def __init__(self, path, model=None, alpha=0.2, image_dim=224,
+    def __init__(self, path, model=None, alpha=0.2, image_dim=56,
         people_per_batch=45, images_per_person=40, batch_size=90, epoch_size=1000, hard_sample_mining=True):
         self.path = path
         self.dataset = get_dataset(self.path)
@@ -517,7 +517,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         for i in range(len(image_paths)):
             image_path = image_paths[i]
             with open(image_path, 'rb') as f:
-                image = self.jpeg_reader.decode(f.read(), 0) #HWC
+               image = self.jpeg_reader.decode(f.read(), 0) #HWC
             image = cv2.resize(image, (self.image_dim, self.image_dim))
             image = torch.tensor(image)
             image = torch.transpose(image, 0, 2)
@@ -573,7 +573,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
         
         return image_paths, num_per_class
 
-    def select_triplets(self, embeddings, nrof_images_per_class, image_paths):
+    def select_triplets(self, embeddings, nrof_examples, nrof_images_per_class, image_paths):
         people_per_batch = self.people_per_batch
         alpha = self.alpha
 
@@ -611,13 +611,14 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
                 nrof_images = int(nrof_images_per_class[i])
                 for j in range(1,nrof_images):
                     a_idx = emb_start_idx + j - 1
-                    neg_dists_sqr = np.sum(np.square(embeddings[a_idx] - embeddings), 1)
+                    #neg_dists_sqr = np.sum(np.square(embeddings[a_idx] - embeddings), 1)
                     for pair in range(j, nrof_images): # For every possible positive pair.
                         p_idx = emb_start_idx + pair
-                        pos_dist_sqr = np.sum(np.square(embeddings[a_idx]-embeddings[p_idx]))
-                        neg_dists_sqr[emb_start_idx:emb_start_idx+nrof_images] = np.NaN
+                        #pos_dist_sqr = np.sum(np.square(embeddings[a_idx]-embeddings[p_idx]))
+                        #neg_dists_sqr[emb_start_idx:emb_start_idx+nrof_images] = np.NaN
                         #all_neg = np.where(np.logical_and(neg_dists_sqr-pos_dist_sqr<alpha, pos_dist_sqr<neg_dists_sqr))[0]  # FaceNet selection
-                        all_neg = np.where(neg_dists_sqr-pos_dist_sqr<alpha)[0] # VGG Face selecction
+                        #all_neg = np.where(neg_dists_sqr-pos_dist_sqr<alpha)[0] # VGG Face selecction
+                        all_neg = np.arange(nrof_examples)
                         nrof_random_negs = all_neg.shape[0]
                         if nrof_random_negs>0:
                             rnd_idx = np.random.randint(nrof_random_negs)
@@ -643,8 +644,8 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
             
             emb_array = self.calculate_embeddings(nrof_examples, image_paths)
 
-            triplets, nrof_random_negs, nrof_triplets = self.select_triplets(emb_array, num_per_class, image_paths)
-            print("num identities", self.people_per_batch, "images per person", self.images_per_person, "nrof_examples", nrof_examples, "triplets in batch", len(triplets))
+            triplets, nrof_random_negs, nrof_triplets = self.select_triplets(emb_array, nrof_examples, num_per_class, image_paths)
+            #print("num identities", self.people_per_batch, "images per person", self.images_per_person, "nrof_examples", nrof_examples, "triplets in batch", len(triplets))
 
             """
             triplets_f = np.array(triplets).flatten()
@@ -654,7 +655,7 @@ class FaceRecognitionDataset(torch.utils.data.IterableDataset):
 
             nrof_batches = int(np.ceil(nrof_triplets/self.batch_size))
             batch_number += nrof_batches
-            print("Yielding new batch")
+            #print("Yielding new batch")
             yield np.array(triplets)
 # TORCH TRAINING - RAVIT
 
