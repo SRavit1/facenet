@@ -55,6 +55,14 @@ def main(args):
     #network = importlib.import_module(args.model_def)
 
     subdir = datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S')
+    # TORCH TRAINING - RAVIT
+    binarized_str = "binarized" if args.binarized else "full"
+    bitwidth_str = "_bitwidth_" + str(args.bitwidth) if args.binarized else ""
+    modelName = "resnet18_" + binarized_str + bitwidth_str
+    subdir = subdir + "_" + modelName
+    # TORCH TRAINING - RAVIT
+
+
     log_dir = os.path.join(os.path.expanduser(args.logs_base_dir), subdir)
     if not os.path.isdir(log_dir):  # Create the log directory if it doesn't exist
         os.makedirs(log_dir)
@@ -85,24 +93,22 @@ def main(args):
         lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
     
     # TORCH TRAINING - RAVIT
-    model = resnet.resnet18(full=False)
-    modelName = "ResNet18"
-
+    model = resnet.resnet18(binarized=args.binarized, bitwidth=args.bitwidth)
+    print("Begin training", modelName)
     trainModel(model, modelName, args.data_dir, args.lfw_dir, model_dir, log_dir)
 
     return model_dir
 
-def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, learning_rate=0.05, epochs=100, alpha=0.2, checkpoint_freq=10):
+def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, learning_rate=0.05, epochs=100, alpha=0.2, checkpoint_freq=1):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     train_set = facenet.FaceRecognitionDataset(data_dir, model=model, alpha=alpha)
-    test_set = facenet.FaceRecognitionDataset(lfw_dir, alpha=alphs)
+    test_set = facenet.FaceRecognitionDataset(lfw_dir, alpha=alpha)
 
     dummy_input = torch.ones((1, 3, train_set.image_dim, train_set.image_dim))
 
     log_file = os.path.join(log_dir, "log.txt")
     model_ckpt_best = os.path.join(models_base_dir, modelName + "_best")
-    model_ckpt_recent = os.path.join(models_base_dir, modelName + "_recent")
 
     with open(log_file, "a") as f:
         f.write("Begin training\n")
@@ -111,13 +117,13 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
     best_eval_accuracy = 0
     for epoch in tqdm(range(epochs)):
         if epoch % checkpoint_freq == 0:
+            model_ckpt_recent = os.path.join(models_base_dir, modelName + "_" + str(epoch))
             torch.save(model.state_dict(), model_ckpt_recent + ".pt")
             torch.onnx.export(model, dummy_input, model_ckpt_recent + ".onnx", opset_version=12)
 
         epoch_start = datetime.now()
         loss, accuracy = train(epoch, train_set, model, alpha, optimizer, log_file)
-
-        eval_loss, eval_accuracy = evaluate(test_set, model, alpha)
+        eval_loss, eval_accuracy = evaluate(test_set, model, alpha, log_file)
 
         if eval_accuracy > best_eval_accuracy:
             torch.save(model.state_dict(), model_ckpt_best + ".pt")
@@ -134,7 +140,6 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
 
         epoch_string = "Epoch[{:d}] finished in {:s} - Loss: {:.3f}, Acuracy: {:.3f}, Eval Loss: {:.3f}, Eval Accuracy {:.3f}".format(epoch+1, 
             str(epoch_end-epoch_start), loss, accuracy, eval_loss, eval_accuracy)
-        print(epoch_string)
         with open(log_file, "a") as f:
             f.write(epoch_string + "\n")
     
@@ -160,7 +165,7 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
     plt.ylabel("Acuracy")
     plt.savefig(os.path.join(log_dir, modelName + "_acc.png"))
 
-def train(epoch, train_set, model, alpha, optimizer, log_file):
+def train(epoch, train_set, model, alpha, optimizer, log_file, print_freq=50):
     loss_meter = facenet.AverageMeter()
     accuracy_meter = facenet.AverageMeter()
     batch_number = 0
@@ -212,12 +217,13 @@ def train(epoch, train_set, model, alpha, optimizer, log_file):
             
             batch_str = "\tEpoch [{:d}] {:d}/{:d} ({:d} triplets) finished in {:s}. Loss: {:.3f}. Accuracy: {:.3f}\n".format(epoch, batch_number, epoch_size, batch_size,
                 str(batch_end-batch_start), float(loss_meter.val), float(accuracy_meter.val))
-            print(batch_str[:-1])
+            if batch_number % print_freq == 0:
+                print(batch_str[:-1])
             with open(log_file, "a") as f:
                 f.write(batch_str)
     return loss_meter.val, accuracy_meter.val
 
-def evaluate(test_set, model, alpha):
+def evaluate(test_set, model, alpha, log_file, print_freq=50):
     loss_meter = facenet.AverageMeter()
     accuracy_meter = facenet.AverageMeter()
     batch_number = 0
@@ -250,7 +256,7 @@ def evaluate(test_set, model, alpha):
                     positive_embedding = model(positive_images)
                     negative_embedding = model(negative_images)
             except Exception:
-                print("Encountered exception in forward pass. batch_tensor has shape", batch_tensor.shape)
+                #print("Encountered exception in forward pass. batch_tensor has shape", batch_tensor.shape)
                 break
             
             with torch.no_grad():
@@ -264,7 +270,8 @@ def evaluate(test_set, model, alpha):
             
             batch_str = "\tEvaluation {:d}/{:d} ({:d} triplets) finished in {:s}. Loss: {:.3f}. Accuracy: {:.3f}\n".format(batch_number, epoch_size, batch_size,
                 str(batch_end-batch_start), float(loss_meter.val), float(accuracy_meter.val))
-            print(batch_str[:-1])
+            if batch_number%print_freq == 0:
+                print(batch_str[:-1])
             with open(log_file, "a") as f:
                 f.write(batch_str)
     return loss_meter.val, accuracy_meter.val
@@ -552,6 +559,11 @@ def parse_arguments(argv):
         help='Path to the data directory containing aligned face patches.', default='/mnt/usb/data/ravit/datasets/lfw')
     parser.add_argument('--lfw_nrof_folds', type=int,
         help='Number of folds to use for cross validation. Mainly used for testing.', default=10)
+    parser.add_argument('--binarized', dest='binarized', action='store_true', help="Set to train binarized model.")
+    parser.add_argument('--no_binarized', dest='binarized', action='store_false', help="Set to train floating point weight model.")
+    parser.set_defaults(binarized=False)
+    parser.add_argument('--bitwidth', type=int, help="", default=4)
+
     return parser.parse_args(argv)
   
 
