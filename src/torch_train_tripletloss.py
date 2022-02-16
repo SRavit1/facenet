@@ -57,8 +57,9 @@ def main(args):
     subdir = datetime.strftime(datetime.now(), '%Y%m%d-%H%M%S')
     # TORCH TRAINING - RAVIT
     binarized_str = "binarized" if args.binarized else "full"
-    bitwidth_str = "_bitwidth_" + str(args.bitwidth) if args.binarized else ""
-    modelName = "resnet18_" + binarized_str + bitwidth_str
+    bitwidth_str = "_bw_" + str(args.bitwidth) if args.binarized else ""
+    weight_bitwidth_str = "_weight_bw_" + str(args.weight_bitwidth) if args.binarized else ""
+    modelName = "resnet18_" + binarized_str + bitwidth_str + weight_bitwidth_str
     subdir = subdir + "_" + modelName
     # TORCH TRAINING - RAVIT
 
@@ -93,7 +94,7 @@ def main(args):
         lfw_paths, actual_issame = lfw.get_paths(os.path.expanduser(args.lfw_dir), pairs)
     
     # TORCH TRAINING - RAVIT
-    model = resnet.resnet18(binarized=args.binarized, bitwidth=args.bitwidth)
+    model = resnet.resnet18(binarized=args.binarized, bitwidth=args.bitwidth, weight_bitwidth=args.weight_bitwidth)
     print("Begin training", modelName)
     trainModel(model, modelName, args.data_dir, args.lfw_dir, model_dir, log_dir)
 
@@ -120,6 +121,8 @@ def trainModel(model, modelName, data_dir, lfw_dir, models_base_dir, log_dir, le
             model_ckpt_recent = os.path.join(models_base_dir, modelName + "_" + str(epoch))
             torch.save(model.state_dict(), model_ckpt_recent + ".pt")
             torch.onnx.export(model, dummy_input, model_ckpt_recent + ".onnx", opset_version=12)
+
+        print("Model created and forward pass run.")
 
         epoch_start = datetime.now()
         loss, accuracy = train(epoch, train_set, model, alpha, optimizer, log_file)
@@ -563,6 +566,7 @@ def parse_arguments(argv):
     parser.add_argument('--no_binarized', dest='binarized', action='store_false', help="Set to train floating point weight model.")
     parser.set_defaults(binarized=False)
     parser.add_argument('--bitwidth', type=int, help="", default=4)
+    parser.add_argument('--weight_bitwidth', type=int, help="", default=1)
 
     return parser.parse_args(argv)
   
